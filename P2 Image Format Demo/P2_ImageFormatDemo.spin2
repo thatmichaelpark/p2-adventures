@@ -1,0 +1,120 @@
+{{
+    P2 Video Out - Image Format Demo
+
+    Last Updated 2022.11.24. Michael Mulholland
+
+    For more Propeller 2 QuickBytes "How To" example code and demos, visit https://www.parallax.com/
+    For great support visit our forums and join our community at https://forums.parallax.com
+
+
+    Based on PSRAM graphics text demo and P2 Video Drivers by Roger Loh : https://forums.parallax.com/discussion/170676/p2-dvi-vga-driver/p1
+
+    Version History:
+
+      2022.11.24. Converted tabs to spaces, for FlexProp custom tabstop compatibility
+      2022.07.20. Initial release for FlexProp IDE
+}}
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+CON { User Settings }
+
+    ' Set the basepin of your video output accessory.
+    ' The basepin is the lowest (first) P2 IO pin number that the accessory is connected to.
+
+    VideoAccessory_BasePin  = 8
+
+    ' For DVI use the #64006D "Digital Video Out" accessory, and either 640x480, 800x480 or 800x600 resolution
+    ' For VGA use the #64006H "A/V Breakout" accessory, and either 640x480, 800x600 or 1024x768 resolution
+
+    VideoFormat = video.DVI_640x480 ' DVI_640x480, DVI_800x480, DVI_800x600, VGA_640x480, VGA_800x600, VGA_1024x768
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+CON { Clock Settings - Required for DEBUG only. May need changing if debuging video modes running at alternative clock settings }
+
+    _clkfreq   = 252000000 ' initial clock rate (would be changed for a given video mode)
+
+
+OBJ
+    video      : "p2simplevideo"
+    nstr       : "jm_nstrings"
+    color      : "colors_32bit"
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+PUB Main() | videoType, videoResolution, x ,y
+
+
+    ' Initialise the video driver with basepin and video settings
+    video.Init(VideoAccessory_BasePin, VideoFormat)
+
+
+    ' Load background image
+    x := (video.XSIZE - 640) / 2                        ' Center align the image by adding some padding. Deduct the header image width of 640 pixels from the actual monitor width (XSIZE), then divide by 2.
+    video.LoadImage(x, 0, @headerImg, true)             ' (pixelX, pixelY, imgAddr, imgFlip)
+
+    ' Show out logo image, centered on the X axis, and almost centered on the Y axis (as we didn't deduct the image height from the pixelY co-ordinate calculation!)
+    video.LoadImage((video.XSIZE - 300) / 2, video.YSIZE/2, @logoImg, true)
+
+    ' Show the same image again, but without the imgFlip, so upside-down ! Add 100 pixels to the pixelY value so the images don't overlap!
+    video.LoadImage((video.XSIZE - 300) / 2, 100 + video.YSIZE/2, @logoImg, false)
+
+    ' Write some text
+    video.WriteText(60, 75, @"Zone 1", video#FONT_LARGE, color#OLIVE, color#OLIVE, false)
+
+
+
+    ' All done! Do something else here, or nothing !
+    repeat
+      waitms(1000)
+
+
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+DAT
+
+    ' IMPORTANT !   Images must be 8-bit BitMap format. 512kB file size limit.
+    '                               For larger images, store to SD card, or load to upper Flash memory.
+
+    headerImg       file "P2_Character_Map_TitleBar_640x50.bmp"
+    logoImg         file "PLX_Logo_300x57.bmp"
+
+
+
+{{
+-------------
+LICENSE TERMS
+-------------
+Copyright 2022 Parallax Inc. https://www.parallax.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+}}

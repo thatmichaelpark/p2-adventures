@@ -1,0 +1,1079 @@
+{{
+
+        P2 SimpleVideo wrapper for the Rogloh P2 Video Driver
+
+        Last Updated 2022.11.24. Michael Mulholland
+
+        Based on PSRAM P2 Video Drivers by Roger Loh :
+          https://forums.parallax.com/discussion/170676/p2-dvi-vga-driver/p1
+
+
+        Version History:
+
+                2022.11.24. Converted tabs to spaces, for FlexProp custom tabstop compatibility
+                2022.08.10. Initial release for FlexProp IDE
+
+}}
+
+
+
+CON
+    _clkfreq = 252000000 ' initial clock rate (would be changed for a given video mode)
+
+    RAM   = $00_000000  ' mapped start address of external PSRAM
+
+    SAFETY_MARGIN = 32 ' a safety margin in P2 clocks (reduce this if you want to push the limits)
+    FRAGMENT_OVERHEAD_CLOCKS = 100 'APPROXIMATELY, precise value is still TBD and may require some more analysis/tweaks
+    REQUEST_OVERHEAD_CLOCKS = 132 'APPROXIMATELY, precise value is still TBD and may require some more analysis/tweaks.  Egg beater always adds some variation.
+
+        ' video output types
+    #0, VGA, DVI, CVBS, SVIDEO, SVIDEO_CVBS, COMPONENT_SDTV, COMPONENT_HDTV
+
+        ' resolution
+    #0, RES_640x350, RES_640x480, RES_800x480_DVI, RES_800x600, RES_800x600_DVI, RES_1024x768, RES_1280x1024, RES_1600x1200, RES_1920x1080, RES_1920x1200
+
+    ' video format
+    #0, DVI_640x480, DVI_800x480, DVI_800x600, VGA_640x480, VGA_800x600, VGA_1024x768
+
+    ' font
+    #0, FONT_SMALL, FONT_MEDIUM, FONT_LARGE
+
+
+    PSRAM_XFER_TIME = 4 ' 16 bit PSRAM config takes 4 P2 clocks to transfer a single 32 bit long to/from external memory
+    PSRAM_PAGE_SIZE = 1024 * 4  ' 16 bit PSRAM config has 4 devices in parallel effectively making a 4 * 1kB = 4kB page size
+
+
+    ' bitmask flags for text window rendering
+    TEXT_FILL_EOL = 1 ' in non-transparent background mode, fill to end of text window line after the text data ends
+    TEXT_FILL_EOW = 2 ' in non-transparent background mode, fill to end of text window after the text data ends
+    TEXT_DROP_SHADOW = 4
+
+    DEGREE = $80000000 / 180
+
+
+OBJ
+    mem  : "psram"
+    vid  : "p2videodrv"
+
+VAR
+    long region[vid.REGION_SIZE/4]
+    long display[vid.DISPLAY_SIZE/4]
+    long fonts[3]
+
+    long XSIZE
+    long YSIZE
+
+    long LINEBUFSIZE
+    long FRAMEBUFSIZE
+
+    byte BPP
+    byte PIXEL
+    byte BASE_PIN
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PUB null()
+
+    '' This is not a top-level object
+    debug(" ")
+    debug("**************************************")
+    debug("ERROR! This is not a top-level object!")
+    debug("       Cannot run this code file. END.")
+    debug("**************************************")
+
+
+''' ------------------------------------------------------------------------------------------------------
+{{
+Init(basepin, videoType, videoResolution)
+
+Initialisation function to setup and start the simple video driver.
+MUST always call this first !
+
+
+Arguments:
+    basepin                 -       First I/O pin that the Video output board / connector is connected to. (Compatible with the Parallax P2 Accessories, either #64006D "Digital Video Out"  or  #64006H "A/V Breakout")
+    videoFormat             -       Use one of the supported video formats: DVI_640x480, DVI_800x480, DVI_800x600, VGA_640x480, VGA_800x600, VGA_1024x768
+
+Returns:
+    No return value
+}}
+PUB Init(basepin, videoFormat) | cog, timing, cogBurstLimit, frame, videoType, videoResolution
+
+
+    BASE_PIN := basepin
+    BPP      := 32 ' colour bit depth
+    PIXEL    := BPP/8
+
+    CASE videoFormat
+
+      DVI_640x480 :
+
+          XSIZE := 640
+          YSIZE := 480
+          videoType := vid.DVI
+          videoResolution := vid.RES_640x480
+
+      DVI_800x480 :
+
+          XSIZE := 800
+          YSIZE := 480
+          videoType := vid.DVI
+          videoResolution := vid.RES_800x480_DVI
+
+      DVI_800x600 :
+
+          XSIZE := 800
+          YSIZE := 600
+          videoType := vid.DVI
+          videoResolution := vid.RES_800x600_DVI
+
+      VGA_640x480 :
+
+          XSIZE := 640
+          YSIZE := 480
+          videoType := vid.VGA
+          videoResolution := vid.RES_640x480
+
+      VGA_800x600 :
+
+          XSIZE := 800
+          YSIZE := 600
+          videoType := vid.VGA
+          videoResolution := vid.RES_800x600
+
+      VGA_1024x768 :
+
+          XSIZE := 1024
+          YSIZE := 768
+          videoType := vid.VGA
+          videoResolution := vid.RES_1024x768
+
+      OTHER :
+
+          DEBUG("Unsupported video format selected. Cannot proceed!")
+          repeat
+
+
+    LINEBUFSIZE  := (XSIZE*BPP)/8 ' compute max line pixels @ 32bpp max * 2 scan lines
+    FRAMEBUFSIZE := (XSIZE*YSIZE*BPP)/8 ' assume worst case true colour
+
+
+    'get the timing for a video resolution
+    timing := vid.getTiming(videoResolution)
+
+    'start PSRAM memory driver, compute delay based on P2 PLL frequency of video mode
+    cog := mem.startx(long[timing][1], 0, 0, -1)
+    if cog < 0
+        DEBUG("Failed to start PSRAM driver")
+        repeat
+
+    ' compute burst limit for COGs based on remaining bandwidth and transfer rate over scan line
+    cogBurstLimit := computeCogBurst(timing, BPP, PSRAM_XFER_TIME)
+
+    if cogBurstLimit <= 0
+        DEBUG("No write bandwidth left for reliable video")
+        repeat
+
+    'setup the writer COG's burst sizes, the video COG will be done on top of this once known
+    repeat cog from 0 to 7
+        mem.setQos(cog, cogBurstLimit << 16)
+
+    'clear initial frame buffer in external memory
+    mem.fillBytes(RAM, 0, FRAMEBUFSIZE, 0)
+
+    if BPP == 8
+        'setup a 8bpp graphics region sourced by framebuffer in external RAM using memory "bus 1"
+        vid.initRegion(@region, vid.LUMA_YELLOW, 0, 0, 0, 0, 0, (1<<28) | RAM, 0)
+        'OR you can use the LUT palette mode, if you supply a palette
+        'vid.initRegion(@region, vid.LUT8, 0, 0, @mario+$36, 0, 0, (1<<28) | RAM, 0)
+    elseif BPP == 16
+        'setup a RGB16 graphics region sourced by framebuffer in external RAM using memory "bus 1"
+        vid.initRegion(@region, vid.RGB16, 0, 0, 0, 0, 0, (1<<28) | RAM, 0)
+    elseif BPP == 32
+        'setup a RGB24 graphics region sourced by framebuffer in external RAM using memory "bus 1"
+        vid.initRegion(@region, vid.RGB24, 0, 0, 0, 0, 0, (1<<28) | RAM, 0)
+    else
+        DEBUG("Unsupported BPP")
+        repeat
+
+    'start a DVI/HDMI display using this region, providing the pins, twin scanline buffer, video timing and mailbox
+
+    if videoType == DVI ' enable for DVI setup
+        cog := vid.initDisplay(-1, @display, vid.DVI, BASE_PIN, 0, 0, @linebuffer, LINEBUFSIZE, timing, mem.getMailbox(0), @region)
+
+    else 'or enable for VGA setup
+        cog := vid.initDisplay(-1, @display, vid.VGA, BASE_PIN, {SYNC_PIN} BASE_PIN+4, vid.RGBHV, @linebuffer, LINEBUFSIZE, timing, mem.getMailbox(0), @region)
+
+    'the video COG makes realtime requests so we give it highest priority service and
+    'its burst size should be limited only by the device
+    mem.setQoS(cog, $fffff400) ' priority 7 & locked bursts
+
+    ' Setup the fonts
+    fixFontAddr()
+
+    'Configure Palette if BPP = 8
+    'if BPP==8
+        'fixPalette(@headerImage)
+
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+DrawLine(pixelX1, pixelY1, pixelX2, pixelY2, color)
+
+Draw single pixel wide line from pixe1X1/Y1 to pixelX2/Y2 with specified color
+
+Arguments:
+        pixelX1                 -       X co-ordinate in pixels, where the line will be drawn from.
+        pixelY1                 -       Y co-ordinate in pixels, where the line will be drawn from.
+        pixelX2                 -       X co-ordinate in pixels, where the line will be drawn to.
+        pixelY2                 -       Y co-ordinate in pixels, where the line will be drawn to.
+        color                   -       color code to draw the box, using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+
+Returns:
+        No return value
+}}
+PUB DrawLine(pixelX1, pixelY1, pixelX2, pixelY2, color)
+
+        mem.gfxLine(getAddr(pixelX1, pixelY1), LINEBUFSIZE, pixelX2, pixelY2, color, 0, PIXEL)
+
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+DrawBox(pixelX, pixelY, lengthX, lengthY, color, lineThickness)
+
+Draw unfilled box from pixelX/Y with X-axis length pixelCountX and Y-axis length pixelCountY
+
+Arguments:
+        pixelX                  -       Top-Left X co-ordinate in pixels, where the image will be drawn.
+        pixelY                  -       Top-Left Y co-ordinate in pixels, where the image will be drawn.
+        lengthX                 -       Length of box horizontal axis (X), in pixels
+        lengthY                 -       Length of box vertical axis (Y), in pixels
+        color                   -       color code to draw the box, using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        lineThickness   -       Line thickness in pixels
+
+Returns:
+        No return value
+}}
+PUB DrawBox(pixelX, pixelY, lengthX, lengthY, color, lineThickness)
+
+        DrawLineH(pixelX, pixelY, lengthX, color, lineThickness) ' Top line
+        DrawLineH(pixelX, pixelY+lengthY-lineThickness, lengthX, color, lineThickness) ' Bottom line
+        DrawLineV(pixelX, pixelY, lengthY, color, lineThickness) ' Left line
+        DrawLineV(pixelX+lengthX-lineThickness, pixelY, lengthY, color, lineThickness) ' Right line
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+WriteText(pixelX, pixelY, textStr, fontIdx, colorFg, colorBg, textShadow)
+
+Write Text (textStr) to the display using specified font and color, with top-left of the text starting at pixelX/pixelY co-ordinate.
+
+Arguments:
+        pixelX                  -       X co-ordinate in pixels, where the text will be drawn from.
+        pixelY                  -       Y co-ordinate in pixels, where the text will be drawn from.
+        textStr                 -       Address pointing to the string to be displayed. Examples: @"hello"  or  @MyDATstring
+        fontIdx                 -       Font index. 0=standard, 1=small, 2=large.
+        colorFg                 -       color code for the text (foreground), using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        colorBg                 -       color code for the text (background), using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        textShadow              -       true/false. If true, a shadow effect will be draw around the text.
+
+Returns:
+        No return value
+}}
+PUB WriteText(pixelX, pixelY, textStr, fontIdx, colorFg, colorBg, textShadow) | font
+
+        font := fonts[fontIdx]
+
+        gfxText(textStr, getAddr(pixelX, pixelY), 0, 0, long[font][2] * STRSIZE(textStr) {font width * length of textStr excluding the trailing null}, long[font][1] {font height}, LINEBUFSIZE, 0, 0, font, colorFg, colorBg, TEXT_FILL_EOW && (textShadow?TEXT_DROP_SHADOW:0), BPP)
+
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+WriteTextMultiLine(pixelX, pixelY, textStr, charsPerLine, fontIdx, colorFg, colorBg, textShadow)
+
+Write Text (textStr) to the display using specified font and color, with top-left of the text starting at pixelX/pixelY co-ordinate.
+
+Arguments:
+        pixelX                  -       X co-ordinate in pixels, where the text will be drawn from.
+        pixelY                  -       Y co-ordinate in pixels, where the text will be drawn from.
+        textStr                 -       Address pointing to the string to be displayed. Examples: @"hello"  or  @MyDATstring
+        charsPerLine    -       Characters rendered per line, before wrapping to next line
+        fontIdx                 -       Font index. 0=standard, 1=small, 2=large.
+        colorFg                 -       color code for the text (foreground), using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        colorBg                 -       color code for the text (background), using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        textShadow              -       true/false. If true, a shadow effect will be draw around the text.
+
+Returns:
+        No return value
+}}
+PUB WriteTextMultiLine(pixelX, pixelY, textStr, charsPerLine, fontIdx, colorFg, colorBg, textShadow) | font
+
+        font := fonts[fontIdx]
+
+        gfxText(textStr, getAddr(pixelX, pixelY), 0, 0, long[font][2] * charsPerLine, long[font][1] * ((long[font][2] * STRSIZE(textStr)) / charsPerLine), LINEBUFSIZE, 0, 0, font, colorFg, colorBg, TEXT_FILL_EOW && (textShadow?TEXT_DROP_SHADOW:0), BPP)
+
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+SetBackgroundColor(color)
+
+Helper function to fill background of display with color
+
+Arguments:
+        color                   -       color code to fill the screen, using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+
+
+Returns:
+        No return value
+}}
+PUB SetBackgroundColor(color)
+
+        DrawLineH(0, 0, XSIZE, color, YSIZE)
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+DrawLineH(pixelX, pixelY, length, color, lineThickness)
+
+Helper function to draw Horizontal line
+
+Arguments:
+        pixelX                  -       Top-Left X co-ordinate in pixels, where the image will be drawn.
+        pixelY                  -       Top-Left Y co-ordinate in pixels, where the image will be drawn.
+        length                  -       Length of section to fill, in pixels
+        color                   -       color code to fill the screen, using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        lineThickness   -       Line thickness in pixels
+
+Returns:
+        No return value
+}}
+PUB DrawLineH(pixelX, pixelY, length, color, lineThickness)
+
+        mem.gfxFill(getAddr(pixelX, pixelY), LINEBUFSIZE, length, lineThickness, color, 0, PIXEL) ' (dstAddr, dstPitch, width, height, pattern, listPtr, datasize)
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+DrawLineV(pixelX, pixelY, length, color, lineThickness)
+
+Helper function to draw Vertical line
+
+Arguments:
+        pixelX                  -       Top-Left X co-ordinate in pixels, where the image will be drawn.
+        pixelY                  -       Top-Left Y co-ordinate in pixels, where the image will be drawn.
+        length                  -       Length of section to fill, in pixels
+        color                   -       color code to fill the screen, using 32-bit format $FF_00_00_00 (Red-Green-Blue-Alpha)
+        lineThickness   -       Line thickness in pixels
+
+Returns:
+        No return value
+}}
+PUB DrawLineV(pixelX, pixelY, length, color, lineThickness)
+
+        mem.gfxFill(getAddr(pixelX, pixelY), LINEBUFSIZE, lineThickness, length, color, 0, PIXEL) ' (dstAddr, dstPitch, width, height, pattern, listPtr, datasize)
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+LoadImage(pixelX, pixelY, imgAddr, imgFlip)
+
+Display an 8-bit image on the attached video monitor.
+Image MUST be saved in 8bit format (8 bits per pixel).
+
+Image ideally even number of pixels wide, else 1 pixel padding will be added on the right edge. (This might be improved in a future version)
+
+
+Arguments:
+        pixelX                  -       Top-Left X co-ordinate in pixels, where the image will be drawn.
+        pixelY                  -       Top-Left Y co-ordinate in pixels, where the image will be drawn.
+        imgAddr                 -       Address of the image stored in P2 memory. Typically use @imgAddr when referencing an image loaded with the file statement in a DAT block. 512kB file size limit.
+        imgFlip                 -       true or false. True if image origin is bottom-left, false if image origin is top-left.
+                                                Images are rendered from Top-Left of the display. If your image is rendered upside-down (because it is saved referenced to Bottom-Left,
+                                                which is typical for human viewable orientation), then set imgFlip to true to flip the image!
+
+Returns:
+        No return value
+
+
+Example DAT block for the image file:
+
+        DAT
+
+                headerImg       file "My_8bit_Bitmap_Image_File.bmp"
+
+}}
+PUB LoadImage(pixelX, pixelY, imgAddr, imgFlip) | x, y, imgSize, imgData, imgWpx, imgHpx, imgBitDepth
+
+        {' Check if BMP file
+        if word[imgAddr] <> $4d42
+                DEBUG("WARNING! Not a valid 8-bit bitmap file type!")
+                repeat ' Game over, block here!
+        else
+                DEBUG("8-bit bitmap detected, OK!")
+        }
+
+        ' Grab image attributes
+        imgSize := long[imgAddr+$02]
+        imgData := long[imgAddr+$0a]
+        imgWpx := long[imgAddr+$12]
+        imgHpx := long[imgAddr+$16]
+        imgBitDepth := word[imgAddr+$1c]
+
+        if (imgBitDepth == 8)
+
+                if (imgFlip)
+
+                        gfxLUT8toRGB24(imgAddr+imgSize-imgWpx, imgAddr+$36, -imgWpx, imgWpx, imgHpx, 0, pixelX, pixelY, LINEBUFSIZE) ' Load img data backward to convert to top-left origin
+
+                else
+
+                        gfxLUT8toRGB24(imgAddr+imgData, imgAddr+$36, imgWpx, imgWpx, imgHpx, 0, pixelX, pixelY, LINEBUFSIZE) ' Img data already rotated to top-left origin
+
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+FontHeight(font_index)
+
+Get the font height in pixels
+
+
+Arguments:
+        font_index              -       Index of font, or use a font constant, example: video#FONT_MEDIUM
+
+
+Returns:
+        Font height in pixels
+
+}}
+PUB FontHeight(font_index) : heightPx
+
+        return long[fonts[font_index]][1]
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+FontWidth(font_index)
+
+Get the font width in pixels
+
+
+Arguments:
+        font_index              -       Index of font, or use a font constant, example: video#FONT_MEDIUM
+
+
+Returns:
+        Font width in pixels
+
+}}
+PUB FontWidth(font_index) : widthPx
+
+        return long[fonts[font_index]][2]
+
+
+' ------------------------------------------------------------------------------------------------------------------------
+{{
+computeCogBurst(timingAddr, bits_per_pixel, p2clks_per_long)
+
+This method computes the maximum burst size a non-video COG can safely use so that a given video
+resolution/timing and bit depth will have sufficient bandwidth to read its pixels from external
+PSRAM without interference by lower priority requests.  The number of P2 clocks consumed per
+scan line in order to read the pixel data is computed and the remaining clocks are then determined.
+These left over P2 clocks and the request overheads are used to figure out the maximum sized
+transfer burst that can be made by a non-video COG such that it can complete before the next
+video driver pixel data request occurs (on average).
+
+NOTE: this may not compute bursts perfectly for page boundary crossing with fragments yet...TBD
+
+Arguments:
+ timingAddr      - address of video timing structure in HUB RAM
+ bits_per_pixel  - self explanatory, value from 1-32
+ p2clks_per_long - number of P2 clocks required to transfer one 32 bit long over the external
+                   memory data bus with this configuration.  It excludes all setup address
+                   overheads and other latency. Only the data transfer portion is used for this.
+                   Determines raw memory bandwidth.
+Returns:
+  Size of maximum safe burst in bytes (rounded down to nearest 16 byte multiple), or zero on error or if insufficient bandwidth remains.
+}}
+PRI computeCogBurst(timingAddr, bits_per_pixel, p2clks_per_long) : cogburst | scanline_clks, burst, video_fragments, active_pixels, video_clks, video_bytes, available_clks
+    active_pixels := byte[timingAddr+8] * 8 ' get number of active pixels from the columns found in video mode timing
+    DEBUG(UDEC_LONG(active_pixels))
+    scanline_clks := active_pixels       ' count the active pixels
+    scanline_clks += byte[timingAddr+9]  ' ...and add back porch blanking pixels
+    scanline_clks += byte[timingAddr+10] ' ...and add sync pixels
+    scanline_clks += byte[timingAddr+11] & $7f  ' ...and add front porch blanking pixels
+    scanline_clks *= byte[timingAddr+17]  ' ...then multiply by P2 clocks per pixel.  NOTE: this assumes integer clocks are used!  TODO: improve this if fractional clocks or direct XFRQ values are used instead.
+    DEBUG(UDEC_LONG(scanline_clks))
+    burst := mem.getBurst()  ' get device's maximum allowed burst size based on maximum chip select low time
+    DEBUG(UDEC_LONG(burst))
+    if burst <= 0 ' don't try to divide by zero or go negative below
+        return 0
+    if burst > PSRAM_PAGE_SIZE ' we also fragment at page boundaries in PSRAM memory too
+        burst := PSRAM_PAGE_SIZE
+    video_bytes := (active_pixels * bits_per_pixel) / 8 ' compute the number of video memory bytes to be read per scan line for transferring the active pixels at the given colour depth
+    video_fragments := (video_bytes + burst-1) / burst ' figure out approximately how many fragments will be issued after the first request completes.  Note: This count is an approximation only because whether/where it crosses the page also depends on the start address of the scan line read which is a run time value and not yet known.  So the fragment count could be one higher than the computed value.   We could increase this value by 1 or allow a larger safety margin to compensate for this chance if required.  The fragment count is currently accurate only if video data is aligned on a page boundary for every scan line, which in general won't always be true.
+    DEBUG(UDEC_LONG(video_bytes))
+    DEBUG(UDEC_LONG(video_fragments))
+    video_clks := REQUEST_OVERHEAD_CLOCKS + video_fragments * FRAGMENT_OVERHEAD_CLOCKS + (video_bytes * p2clks_per_long)/4 ' compute P2 clocks consumed per video scan line for all the video driver's pixel data transfers and all the overhead in the driver
+    DEBUG(UDEC_LONG(video_clks))
+    available_clks := scanline_clks - video_clks ' compute remaining time in the scan line in P2 clocks for other COGs to use
+    cogburst := 4*(available_clks - REQUEST_OVERHEAD_CLOCKS - FRAGMENT_OVERHEAD_CLOCKS - SAFETY_MARGIN) / p2clks_per_long ' transform P2 clocks remaining into bytes allowed to be transferred from the device based on the memory transfer rate and the request overhead, leaving a safety margin
+    if cogburst < 0
+        return 0
+    cogburst &= !$f ' quantize transfers to a 16 byte multiple
+
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI fixPalette(imgAddr)| i
+
+    repeat i from 0 to 255
+        long[imgAddr+$36][i] <<= 8
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI fixFontAddr()
+
+    ' fixup font addresses at runtime (ugly!)
+    long[@p2font16]:=@font8x16
+    long[@smallfont]:=@font8x6
+    long[@p2font32]:=@font16x32
+
+    fonts[FONT_SMALL]:=@smallfont
+    fonts[FONT_MEDIUM]:=@p2font16
+    fonts[FONT_LARGE]:=@p2font32
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI getAddr(pixelX, pixelY) : result
+
+    ' Provide x and y co-ordinate in pixels, return memory address
+
+    ' Example, getAddr(639,479) would return address for last pixel (bottom-right) on the display of a 640x480 resolution monitor
+    ' Example, getAddr(0,0) would return address for first pixel (top-left) on the display of any resolution monitor
+
+    return ((XSIZE * pixelY) + pixelX) * PIXEL
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+{{
+gfxText(textStr, baseAddr, x, y, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, bg, flags, bitsPerPixel)
+
+    Prints text from a string buffer in HUB RAM into a text window defined in graphics memory.  The text window rectangle
+    top left corner position is determined from x,y co-ordinates relative to some base address, and the size is specified
+    by width and height parameters, as well as the stride between scan lines which defines the canvas size or allows packing
+    graphics into linear memory.  A separate source image can be provided when transparent backgrounds are used, so the text
+    can be rendered over some reference bitmap image and then moved into the final destination text box area in memory avoiding
+    permanently polluting the frame buffer where the image is stored.  If both srcImgAdd and srcStride are zero, is the same as
+    the destination address and stride, and text will be rendered directly on top of the existing pixels in the destination rectangle.
+
+    Transparency can be enabled by making the bg colour the same as the fg colour value.
+
+    Scan line buffers where pixel data is temporarily constructed before being written to memory are maintained internally per COG (for now).
+
+    Arguments:
+     textStr      - string buffer in HUB RAM containing characters to put in the text window
+     baseAddr     - start address of frame buffer memory to render into (for defining location of destination rectangle)
+     x            - x offset from base address in pixels from top left corner
+     y            - y offset from base address in scan lines from top left corner
+     width        - width in pixels of text window rectangle area to accept the text
+     height       - height in scan lines of text window rectangle area to accept the text
+     stride       - spacing in bytes between consecutive scan lines of destination rectangle
+     srcImgAddr   - points to information to be rendered as the background pixels under the text in case of a transparent bg colour (0=baseAddr)
+     srcStride    - number of bytes between consecutive scan lines in memory for the source image (0=stride)
+     fontInfoAddr - address of information structure of font to be used to render text
+     fg           - foreground colour for font
+     bg           - background colour for font, set to foreground colour to make background transparent
+     flags        - flags that control text rendering (TEXT_FILL_EOL, TEXT_FILL_EOW)
+     bitsPerPixel - pixel colour format in memory (8/16/32) bits per pixel
+
+    Returns -
+        nothing
+        TODO: maybe eventually return number of characters actually printed in the window...for formatting etc.
+}}
+
+PRI gfxText(textStr, baseAddr, x, y, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, bg, flags, bitsPerPixel) | textAddr, scratchBufAddr, offset
+
+    textAddr := baseAddr + (x*bitsPerPixel)/8 + y*stride
+    scratchBufAddr := @textBuf + (cogid()*LINEBUFSIZE) ' choose a per COG scratch buffer so multiple COGs can render at the same time
+
+    if flags & TEXT_DROP_SHADOW ' TODO: add some pixel offset control?
+
+      offset := byte[fontInfoAddr][12]*(bitsPerPixel/8) + byte[fontInfoAddr][13]*stride
+      ' draw transparently with bg colour as fg colour first using pixel offset, then redraw at proper position with actual fg colour
+      case bitsPerPixel
+        8:  gfxText8(textStr, textAddr+offset, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, bg, bg, scratchBufAddr, flags)
+            gfxText8(textStr, textAddr, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, fg, scratchBufAddr, flags)
+        16: gfxText16(textStr, textAddr+offset, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, bg, bg, scratchBufAddr, flags)
+            gfxText16(textStr, textAddr, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, fg, scratchBufAddr, flags)
+        32: gfxText32(textStr, textAddr+offset, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, bg, bg, scratchBufAddr, flags)
+            gfxText32(textStr, textAddr, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, fg, scratchBufAddr, flags)
+        other: return ' TODO: no support for 1/2/4 bpp mode yet
+    else
+      case bitsPerPixel
+        8:  gfxText8(textStr, textAddr, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, bg, scratchBufAddr, flags)
+        16: gfxText16(textStr, textAddr, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, bg, scratchBufAddr, flags)
+        32: gfxText32(textStr, textAddr, width, height, stride, srcImgAddr, srcStride, fontInfoAddr, fg, bg, scratchBufAddr, flags)
+        other: return ' TODO: no support for 1/2/4 bpp mode yet
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI {++opt(!regs)} gfxText8(textStr, addr, w, h, stride, srcAddr, srcStride, fontPtr, fg, bg, buf, flags) : len | scanLines, maxBytes, maxChars, lcl_fontWidth, char, glyph, pix, pix1, pix2, srcPtr, destPtr, font, lcl_fontHeight, fontOffset
+
+    ' extract font information
+    font := long[fontPtr][0]
+    lcl_fontHeight := long[fontPtr][1]
+    lcl_fontWidth := long[fontPtr][2]
+    fontOffset := lcl_fontHeight<<8
+    ' figure out how many characters will fit in the rectangle based on the font width
+    maxChars:= w/lcl_fontWidth
+    lcl_fontWidth := lcl_fontWidth >> 3 ' now groups of 8 pixels
+    if srcAddr | srcStride == 0
+        srcAddr := addr
+        srcStride := stride
+
+    ' exit if no room
+    if maxChars <= 0 or h <= 0
+        return
+
+    asm
+                                mov     scanLines, #0
+                                movbyts fg, #%%0000
+                                movbyts bg, #%%0000
+                                mov     maxBytes, maxChars
+                                mul     maxBytes, #8
+                                mul     maxBytes, lcl_fontWidth
+    endasm
+
+    repeat
+        ' if the background is same the as foreground colour treat it as a transparent background
+        ' and render text on top of existing frame buffer or different srcaddr.
+        if fg == bg
+            ' read the scan line here
+            mem.read(buf, srcAddr, maxBytes)
+            srcAddr+=srcStride
+
+        asm
+                                            mov     len, #0
+                                            mov     ptrb, textStr
+                                            mov     srcPtr, buf
+                                            mov     destPtr, buf
+                                            'loop until end of string or rectangle width limit reached
+                                textloop8   rdbyte  char, ptrb++ wz
+                                    if_z    jmp     #endstring8
+                                            setbyte char, scanLines, #1
+                                            add     char, font
+                                            rdbyte  glyph, char
+                                            mov     pix, lcl_fontWidth  ' n x 8 pixels = char
+                                            cmp     fg, bg wz ' check if transparent background
+                                    if_z    jmp     #trans8
+                                solid8      mov     pix1, bg
+                                            mov     pix2, bg
+                                            jmp     #setpixels8
+                                trans8      setq    #1
+                                            rdlong  pix1, srcPtr
+                                            add     srcptr, #8
+                                setpixels8
+                                            xor     glyph, #$ff
+                                            skip    glyph
+                                            setbyte pix1, fg, #0
+                                            setbyte pix1, fg, #1
+                                            setbyte pix1, fg, #2
+                                            setbyte pix1, fg, #3
+                                            setbyte pix2, fg, #0
+                                            setbyte pix2, fg, #1
+                                            setbyte pix2, fg, #2
+                                            setbyte pix2, fg, #3
+                                            setq    #1
+                                            wrlong  pix1, destPtr
+                                            add     destPtr, #8
+
+                                            add     char, fontOffset
+                                            rdbyte  glyph, char
+
+                                    if_z    djnz    pix, #trans8
+                                    if_nz   djnz    pix, #solid8
+
+                                            add     len, #1
+                                            cmp     len, maxChars wz
+                                    if_nz   jmp     #textloop8
+                                endstring8
+        endasm
+        'write back the rendered text buffer data
+        if (flags & (TEXT_FILL_EOL|TEXT_FILL_EOW)) && fg <> bg
+            byteFill(buf+(len*lcl_fontWidth)<<3, bg, w-len*(lcl_fontWidth<<3))
+            mem.write(buf, addr, w)
+        elseif len
+            mem.write(buf, addr, (lcl_fontWidth*len)<<3)
+
+        ' move to next scanline
+        addr += stride
+        if ++scanLines == lcl_fontHeight
+            scanLines := 0
+            textStr += len ' advance in text string by the number of characters printed
+            if h <= lcl_fontHeight && fg <> bg
+                quit
+    until --h == 0 or len == 0
+
+    if h && fg <> bg && (flags & TEXT_FILL_EOW)
+        mem.gfxFill(addr, stride, w, h, bg, 0, 1)
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI {++opt(!regs)} gfxText16(textStr, addr, w, h, stride, srcAddr, srcStride, fontPtr, fg, bg, buf, flags) : len | char, glyph, pix, pix1, pix2, pix3, pix4, scanLines, srcPtr, destPtr, maxBytes, maxChars, font, lcl_fontHeight, lcl_fontWidth, fontOffset
+
+    ' extract font information
+    font := long[fontPtr][0]
+    lcl_fontHeight := long[fontPtr][1]
+    lcl_fontWidth := long[fontPtr][2]
+    fontOffset := lcl_fontHeight<<8
+    ' figure out how many characters will fit in the rectangle based on the font width
+    maxChars:= w/lcl_fontWidth
+    lcl_fontWidth := lcl_fontWidth >> 3 ' now groups of 8 pixels
+    if srcAddr | srcStride == 0
+        srcAddr := addr
+        srcStride := stride
+
+    ' exit if no room
+    if maxChars <= 0 or h <= 0
+        return
+
+    asm
+                                mov     scanLines, #0
+                                movbyts fg, #%%1010
+                                movbyts bg, #%%1010
+                                mov     maxBytes, maxChars
+                                mul     maxBytes, #16
+                                mul     maxBytes, lcl_fontWidth
+    endasm
+
+    repeat
+        ' if the background is same the as foreground colour treat it as a transparent background
+        ' and render text on top of existing frame buffer or different srcaddr.
+        if fg == bg
+            ' read the scan line here
+            mem.read(buf, srcAddr, maxBytes)
+            srcAddr+=srcStride
+
+        asm
+                                            mov     len, #0
+                                            mov     ptrb, textStr
+                                            mov     srcPtr, buf
+                                            mov     destPtr, buf
+                                            'loop until end of string or rectangle width limit reached
+                                textloop16  rdbyte  char, ptrb++ wz
+                                    if_z    jmp     #endstring16
+                                            setbyte char, scanLines, #1
+                                            add     char, font
+                                            rdbyte  glyph, char
+                                            mov     pix, lcl_fontWidth  ' n x 8 pixels = char
+                                            cmp     fg, bg wz ' check if transparent background
+                                    if_z    jmp     #trans16
+                                solid16     mov     pix1, bg
+                                            mov     pix2, bg
+                                            mov     pix3, bg
+                                            mov     pix4, bg
+                                            jmp     #setpixels16
+                                trans16     setq    #3
+                                            rdlong  pix1, srcPtr
+                                            add     srcptr, #16
+                                setpixels16
+                                            xor     glyph, #$ff
+                                            skip    glyph
+                                            setword pix1, fg, #0
+                                            setword pix1, fg, #1
+                                            setword pix2, fg, #0
+                                            setword pix2, fg, #1
+                                            setword pix3, fg, #0
+                                            setword pix3, fg, #1
+                                            setword pix4, fg, #0
+                                            setword pix4, fg, #1
+
+                                            setq    #3
+                                            wrlong  pix1, destPtr
+                                            add     destPtr, #16
+
+                                            add     char, fontOffset
+                                            rdbyte  glyph, char
+
+                                    if_z    djnz    pix, #trans16
+                                    if_nz   djnz    pix, #solid16
+
+                                            add     len, #1
+                                            cmp     len, maxChars wz
+                                    if_nz   jmp     #textloop16
+                                endstring16
+        endasm
+        'write back the rendered text buffer data
+        if (flags & (TEXT_FILL_EOL|TEXT_FILL_EOW)) && fg <> bg
+            wordFill(buf+(len*lcl_fontWidth)<<4, bg, w-len*(lcl_fontWidth<<3))
+            mem.write(buf, addr, w<<1)
+        elseif len
+            mem.write(buf, addr, (lcl_fontWidth*len)<<4)
+
+        ' move to next scanline
+        addr += stride
+        if ++scanLines == lcl_fontHeight
+            scanLines := 0
+            textStr += len ' advance in text string by the number of characters printed
+            if h <= lcl_fontHeight && fg <> bg
+                quit
+    until --h == 0 or len == 0
+
+    if h && fg <> bg && (flags & TEXT_FILL_EOW)
+        mem.gfxFill(addr, stride, w, h, bg, 0, 2)
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI {++opt(!regs)} gfxText32(textStr, addr, w, h, stride, srcAddr, srcStride, fontPtr, fg, bg, buf, flags) : len | char, glyph, pix, pix1, pix2, pix3, pix4, pix5, pix6, pix7, pix8, scanLines, srcPtr, destPtr, maxBytes, maxChars, font, lcl_fontHeight, lcl_fontWidth, fontOffset
+
+    ' extract font information
+    font := long[fontPtr][0]
+    lcl_fontHeight := long[fontPtr][1]
+    lcl_fontWidth := long[fontPtr][2]
+    fontOffset := lcl_fontHeight<<8
+
+    ' figure out how many characters will fit in the rectangle based on the font width
+    maxChars:= w/lcl_fontWidth
+    lcl_fontWidth := lcl_fontWidth >> 3 ' now groups of 8 pixels
+    if srcAddr | srcStride == 0
+        srcAddr := addr
+        srcStride := stride
+
+    ' exit if no room
+    if maxChars <= 0 or h <= 0
+        return
+
+    asm
+                                mov     scanLines, #0
+                                mov     maxBytes, maxChars
+                                mul     maxBytes, #32
+                                mul     maxBytes, lcl_fontWidth
+    endasm
+
+    repeat
+        ' if the background is same the as foreground colour treat it as a transparent background
+        ' and render text on top of existing frame buffer or different srcaddr.
+        if fg == bg
+            ' read the scan line here
+            mem.read(buf, srcAddr, maxBytes)
+            srcAddr+=srcStride
+
+        asm
+                                            mov     len, #0
+                                            mov     ptrb, textStr
+                                            mov     srcPtr, buf
+                                            mov     destPtr, buf
+                                            'loop until end of string or rectangle width limit reached
+                                textloop32  rdbyte  char, ptrb++ wz
+                                    if_z    jmp     #endstring32
+                                            setbyte char, scanLines, #1
+                                            add     char, font
+                                            rdbyte  glyph, char
+                                            mov     pix, lcl_fontWidth  ' n x 8 pixels = char
+                                            cmp     fg, bg wz ' check if transparent background
+                                    if_z    jmp     #trans32
+                                solid32     mov     pix1, bg
+                                            mov     pix2, bg
+                                            mov     pix3, bg
+                                            mov     pix4, bg
+                                            mov     pix5, bg
+                                            mov     pix6, bg
+                                            mov     pix7, bg
+                                            mov     pix8, bg
+                                            jmp     #setpixels32
+                                trans32     setq    #7
+                                            rdlong  pix1, srcPtr
+                                            add     srcptr, #32
+                                setpixels32 xor     glyph, #$ff
+                                            skip    glyph
+                                            mov     pix1, fg
+                                            mov     pix2, fg
+                                            mov     pix3, fg
+                                            mov     pix4, fg
+                                            mov     pix5, fg
+                                            mov     pix6, fg
+                                            mov     pix7, fg
+                                            mov     pix8, fg
+
+                                            setq    #7
+                                            wrlong  pix1, destPtr
+                                            add     destPtr, #32
+
+                                            add     char, fontOffset
+                                            rdbyte  glyph, char
+
+                                    if_z    djnz    pix, #trans32
+                                    if_nz   djnz    pix, #solid32
+
+                                            add     len, #1
+                                            cmp     len, maxChars wz
+                                    if_nz   jmp     #textloop32
+                                endstring32
+        endasm
+
+        'write back the rendered text buffer data
+        if (flags & (TEXT_FILL_EOL|TEXT_FILL_EOW)) && fg <> bg
+            longFill(buf+(len*lcl_fontWidth)<<5, bg, w-len*(lcl_fontWidth<<3))
+            mem.write(buf, addr, w<<2)
+        elseif len
+            mem.write(buf, addr, (lcl_fontWidth*len)<<5)
+
+        ' move to next scanline
+        addr += stride
+        if ++scanLines == lcl_fontHeight
+            scanLines := 0
+            textStr += len ' advance in text string by the number of characters printed
+            if h <= lcl_fontHeight && fg <> bg
+                quit
+    until --h == 0 or len == 0
+
+    if h && fg <> bg && (flags & TEXT_FILL_EOW)
+        mem.gfxFill(addr, stride, w, h, bg, 0, 4)
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+PRI gfxLUT8toRGB24(hubSrcImage, hubPaletteAddr, srcStride, w, h, destBaseAddr, x, y, stride) | index, colour, len, addr, buf
+
+    if w <= 0 or h <= 0
+        return
+
+    if abs(srcStride)//2 > 0 ' Pad stride if not even
+
+        if srcStride > 0
+                srcStride++
+        else
+                srcStride--
+                hubSrcImage--
+
+    destBaseAddr += y*stride + (x<<2)
+    buf := @textbuf + cogid()*LINEBUFSIZE
+
+    repeat h
+
+      asm
+
+                                            mov     len, w
+                                            mov     ptrb, buf
+                                            mov     addr, hubSrcImage
+                                copyloop    rdbyte  index, addr
+                                            add     addr, #1
+                                            shl     index, #2
+                                            add     index, hubPaletteAddr
+                                            rdlong  colour, index
+                                            shl     colour, #8
+                                            wrlong  colour, ptrb++
+                                            djnz    len, #copyloop
+
+      endasm
+
+      hubSrcImage+=srcStride
+      mem.write(buf, destBaseAddr, w<<2)
+      destBaseAddr+=stride
+
+
+
+''' ------------------------------------------------------------------------------------------------------
+DAT
+
+{
+        ' Hard coded buffer sizes
+        XSIZE   BPP     LINEBUF         textbuf/srcbuf          linebuffer
+        640     32      2560            20480                   5120
+        800     32      3200            25600                   6400
+        1024    32      4096            32768                   8192
+        1280    32      5120            40960                   10240
+        1600    32      6400            51200                   12800
+        1920    32      7680            61440                   15360
+}
+
+
+
+{
+' Up to 1920x960
+textbuf     byte 0[61440] ' [LINEBUFSIZE*8] ' a scratch buffer for text per COG
+srcbuf      byte 0[61440] ' [LINEBUFSIZE*8] ' a scratch buffer for other source data per COG
+linebuffer  byte 0[15360] ' [2*LINEBUFSIZE] ' two scanline buffers
+}
+
+' Up to 1024x768
+textbuf     byte 0[32768] ' [LINEBUFSIZE*8] ' a scratch buffer for text per COG
+srcbuf      byte 0[32768] ' [LINEBUFSIZE*8] ' a scratch buffer for other source data per COG
+linebuffer  byte 0[8192]  ' [2*LINEBUFSIZE] ' two scanline buffers
+
+{
+' Up to 640x480
+textbuf     byte 0[20480] ' [LINEBUFSIZE*8] ' a scratch buffer for text per COG
+srcbuf      byte 0[20480] ' [LINEBUFSIZE*8] ' a scratch buffer for other source data per COG
+linebuffer  byte 0[5120]  ' [2*LINEBUFSIZE] ' two scanline buffers
+}
+
+
+
+' For now fonts need to be passed in as pointers to a 3 long structure with the following format
+'   long 0 - points to actual font data in HUB RAM
+'   long 1 - contains the number of scan lines in the font data (1-255)
+'   long 2 - contains the width in pixels of the font data (8,16,24,32 etc)... for now this must be multiple of 8
+' font pixel data is arranged by character 0..255, then by scanline 0-n, then by width offset (leftmost 8 pixels of char first, then next 8 etc.)
+
+
+p2font16    long @font8x16 ' address needs re-mapping at run time
+            long 16 'height
+            long 8 'width
+            long $0101  ' drop shadow pixel offsets (y<<8) | x
+font8x16    file "p2font16"
+
+
+p2font32    long @font16x32
+            long 32 ' height
+            long 16 ' width
+            long $0202  ' drop shadow pixel offsets (y<<8) | x
+font16x32   file "p2font32"
+
+
+smallfont   long @font8x6
+            long 6 'height
+            long 8 'width
+            long $0101  ' drop shadow pixel offsets (y<<8) | x
+font8x6     file "font6"
+
+
+
+
+{{
+-------------
+LICENSE TERMS
+-------------
+Copyright 2022 Parallax Inc. https://www.parallax.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+}}

@@ -1,0 +1,267 @@
+{{
+    P2 Solar Panel Monitor demo
+
+    Last Updated 2022.11.24. Michael Mulholland
+
+    For more Propeller 2 QuickBytes "How To" example code and demos, visit https://www.parallax.com/
+    For great support visit our forums and join our community at https://forums.parallax.com
+
+
+    Based on PSRAM graphics text demo and P2 Video Drivers by Roger Loh : https://forums.parallax.com/discussion/170676/p2-dvi-vga-driver/p1
+
+    Version History:
+
+          2022.11.24. Converted tabs to spaces, for FlexProp custom tabstop compatibility
+          2022.07.25. Initial release for FlexProp IDE
+}}
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+CON { User Settings }
+
+    ' Set the basepin of your video output accessory.
+    ' The basepin is the lowest (first) P2 IO pin number that the accessory is connected to.
+
+    VideoAccessory_BasePin  = 8
+
+    ' For DVI use the #64006D "Digital Video Out" accessory, and either 640x480, 800x480 or 800x600 resolution
+    ' For VGA use the #64006H "A/V Breakout" accessory, and either 640x480, 800x600 or 1024x768 resolution
+
+    VideoFormat = video#DVI_800x480 ' DVI_640x480, DVI_800x480, DVI_800x600, VGA_640x480, VGA_800x600, VGA_1024x768
+
+    ' Tip! Not all HDMI monitors will support DVI_800x480 resolution. If it doesn't work, try DVI_800x600 or DVI_640x480 instead!
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+CON { Clock Settings - Required for DEBUG only. May need changing if debuging video modes running at alternative clock settings }
+
+    _clkfreq   = 252000000 ' initial clock rate (would be changed for a given video mode)
+    strbufsize = 100
+
+OBJ
+    video      : "p2simplevideo"
+    nstr       : "jm_nstr"
+    color      : "colors_32bit"
+
+VAR
+
+    byte strbuf[strbufsize]
+
+    byte strtime[6]
+    byte hours,mins
+
+    long totalYield
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+PUB Main() | videoType, videoResolution
+
+
+    ' Initialise the video driver with basepin and video settings
+    video.Init(VideoAccessory_BasePin, VideoFormat)
+
+    ' Background
+    video.SetBackgroundColor(color#WHITE)
+
+
+    repeat
+
+      updateDisplay()
+      waitms(1000)
+
+      ' You could do lot's of interesting stuff here!
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+' -------------------------------------------------------------------------------------------------------------------------------
+
+PRI updateDisplay() | x , y, padx, marginx, imgWidth, t, w, totWatts, tempC, colorFg, colorBg
+
+    ' Header
+    video.DrawLineH(0, 0, video.XSIZE, color#DARKORANGE, 52) ' Draw header background
+    video.DrawLineH(0, 52, video.XSIZE, color#PLX_BLACK, 3) ' Add a darker line at the edge
+    video.WriteText(10, 10, @"P2 Multi-Zone Solar Panel Monitor", video#FONT_LARGE, color#PLX_BLACK, color#DARKORANGE, false)  ' Font is 32 pixels tall
+
+    video.WriteText(video.XSIZE-10-(5*16), 10, getTime(), video#FONT_LARGE, color#WHITE, color#DARKORANGE, false) ' Show time at XSIZE minus the 10 padding and minus the width of the time characters (5 characters * 16 pixels wide)
+
+
+
+    ' Content area, draw some boxes to fill with data
+    imgWidth := 95 ' Based on the included box image, which is 95x95 pixels (WxH)
+    t := 8 ' Total of boxes to draw on one line of the screen
+    padx := (video.XSIZE - (t*imgWidth)) / t        ' Calculate optimal padding between each box, based on current total screen width
+    marginx := padx/2       '        Calculate left margin
+    marginx := marginx < video.BPP ? ++marginx : marginx ' Ensure marginx at least 1 pixel of current screen resolution.
+    totWatts := 0
+
+
+    ' First row of boxes
+    y := 100
+    repeat x from 0 to t-1
+
+        video.LoadImage(marginx + (x*imgWidth) + (x*padx), y, @databoxImg, true)
+
+        clearStringBuffer(@strbuf)
+        strAppend(@strbuf, nstr.padstr(nstr.dec(x, 0), 5, " "))
+        strAppend(@strbuf, nstr.padstr(nstr.dpdec(readVolts(x),1), 4, " "))
+        strAppend(@strbuf, string("V"))
+        w := readWatts(x)
+        totWatts += w
+        strAppend(@strbuf, nstr.padstr(nstr.dec(w,0), 4, " "))
+        strAppend(@strbuf, string("W"))
+
+        video.WriteTextMultiLine(marginx + (x*imgWidth) + (x*padx) + 8, y, @strbuf, 5, video#FONT_LARGE, color#WHITE, color#WHITE, false)
+
+
+    ' Second row of boxes
+    y+=100
+    repeat x from 0 to t-1
+
+        video.LoadImage(marginx + (x*imgWidth) + (x*padx), y, @databoxImg, true)
+
+        ' Index
+        clearStringBuffer(@strbuf)
+        strAppend(@strbuf, nstr.padstr(nstr.dec(x+8, 0), 5, " "))
+        video.WriteText(marginx + (x*imgWidth) + (x*padx) + 8, y, @strbuf, video#FONT_LARGE, color#RED, color#RED, false)
+
+        ' Volts
+        clearStringBuffer(@strbuf)
+        strAppend(@strbuf, nstr.padstr(nstr.dpdec(readVolts(x+8),1), 4, " "))
+        strAppend(@strbuf, string("V"))
+        video.WriteText(marginx + (x*imgWidth) + (x*padx) + 8, y+32, @strbuf, video#FONT_LARGE, color#WHITE, color#WHITE, false)
+
+        ' Watts
+        clearStringBuffer(@strbuf)
+        w := readWatts(x+8)
+        totWatts += w
+        strAppend(@strbuf, nstr.padstr(nstr.dec(w,0), 4, " "))
+        strAppend(@strbuf, string("W"))
+        video.WriteText(marginx + (x*imgWidth) + (x*padx) + 8, y+64, @strbuf, video#FONT_LARGE, color#NAVY, color#NAVY, false)
+
+
+    ' Draw dividing horizontal line
+    y+=132
+    video.DrawLineH(0, y, video.XSIZE, color#BLACK, 3)
+
+
+    ' Write summary data
+    totalYield += (totWatts/1000)
+
+    y+=8 + 3
+    tempC := readTemperature()
+    colorFg := color#WHITE
+    colorBg := tempC < 20 ? color#RED : color#GREEN ' Change background color, depending on temperature reading
+    video.WriteText(marginx + padx, y, @"Outside Temperature :       C", video#FONT_LARGE, colorFg, colorBg, false)
+    video.WriteText(marginx + padx +(24*16), y, nstr.padstr(nstr.dec(readTemperature(), 0), 3, " "), video#FONT_LARGE, colorFg, colorBg, false) ' (22*16) is the string position to fill with the value, multipled by character width
+
+    y+=32
+    video.WriteText(marginx + padx, y, @"Total Yield Today   :       kWh", video#FONT_LARGE, color#PLX_BLACK, color#WHITE, false)
+    video.WriteText(marginx + padx +(22*16), y, nstr.dpdec(totalYield,3), video#FONT_LARGE, color#PLX_BLACK, color#WHITE, false)
+
+
+    ' Footer
+    video.LoadImage(video.XSIZE - 300 {deduct logo width from XSIZE}, video.YSIZE - 57 {deduct logo height from YSIZE}, @logoImg, true)     ' Align logo image bottom-right of screen
+    video.DrawLineH(0, video.YSIZE-57-8, video.XSIZE, color#PLX_BLACK, 3) ' Draw footer dividing horizontal line
+
+
+   ' Done!
+
+' -------------------------------------------------------------------------------------------------------------------------------
+' -------------------------------------------------------------------------------------------------------------------------------
+
+' String helper functions
+
+PRI strAppend(buf, s) | n1, n2
+
+    n1 := strsize(buf)
+    n2 := strsize(s) + 1    'trailing 0
+    buf += n1
+    bytemove(buf, s, n2)
+
+PRI clearStringBuffer(buf)
+
+    bytefill(buf, 0, strbufsize-1)
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+PRI getTime() : strAddr
+
+
+    if (++mins == 60)
+        mins := 0
+        hours++
+
+        if (hours == 24)
+        hours := 0
+
+
+    bytefill(@strtime, 0, 5)
+    strAppend(@strtime, nstr.dec(hours, 2))
+    strAppend(@strtime, string(":"))
+    strAppend(@strtime, nstr.dec(mins, 2))
+
+    return @strtime
+
+' -------------------------------------------------------------------------------------------------------------------------------
+' -------------------------------------------------------------------------------------------------------------------------------
+
+' Dummy ADC channel read commands
+PRI readVolts(channel) : value
+
+    return GETRND() & $FF ' Restrict value to 0-255 range for demo
+
+PRI readWatts(channel) : value
+
+    return GETRND() & $FF ' Restrict value to 0-255 range for demo
+
+ PRI readTemperature() : value
+
+    return GETRND() & $1F ' Restrict value to 0-31 range for demo
+
+' -------------------------------------------------------------------------------------------------------------------------------
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+DAT
+
+    ' IMPORTANT !   512kB file size limit.
+    '                               For larger images, store to SD card, or load to upper Flash memory.
+
+    logoImg         file "PLX_Logo_300x57.bmp"
+    databoxImg      file "SolarPanelBox_95x95.bmp"
+
+
+
+
+
+
+{{
+-------------
+LICENSE TERMS
+-------------
+Copyright 2022 Parallax Inc. https://www.parallax.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+}}

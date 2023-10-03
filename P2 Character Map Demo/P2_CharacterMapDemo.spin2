@@ -1,0 +1,207 @@
+{{
+    P2 Character Map display demo
+
+    Last Updated 2022.11.24. Michael Mulholland
+
+
+    This code example will display the contents of a font file to VGA or DVI type monitors
+
+    Refer to the QuickBytes page for full details and hardware requirements : https://www.parallax.com/propeller-2/quick-bytes/
+
+
+    For more Propeller 2 QuickBytes "How To" example code and demos, visit https://www.parallax.com/
+    For great support visit our forums and join our community at https://forums.parallax.com
+
+
+    Based on PSRAM graphics text demo and P2 Video Drivers by Roger Loh : https://forums.parallax.com/discussion/170676/p2-dvi-vga-driver/p1
+
+
+    Version History:
+
+            2022.11.24. Converted tabs to spaces, for FlexProp custom tabstop compatibility
+            2022.08.10. Initial release for FlexProp IDE
+}}
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+CON { User Settings }
+
+    ' Set the basepin of your video output accessory.
+    ' The basepin is the lowest (first) P2 IO pin number that the accessory is connected to.
+
+    VideoAccessory_BasePin  = 8
+
+    ' For DVI use the #64006D "Digital Video Out" accessory, and either 640x480, 800x480 or 800x600 resolution
+    ' For VGA use the #64006H "A/V Breakout" accessory, and either 640x480, 800x600 or 1024x768 resolution
+
+    VideoFormat = video#DVI_640x480 ' DVI_640x480, DVI_800x480, DVI_800x600, VGA_640x480, VGA_800x600, VGA_1024x768
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+CON { Clock Settings - Required for DEBUG only. May need changing if debuging video modes running at alternative clock settings }
+
+    _clkfreq  = 252000000 ' initial clock rate (would be changed for a given video mode)
+
+
+OBJ
+    video     : "p2simplevideo"
+    nstr      : "jm_nstrings"
+    color     : "colors_32bit"
+
+VAR
+    byte charbuf[2]
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+PUB Main() | videoType, videoResolution
+
+
+    ' Initialise the video driver with basepin and video settings
+    video.Init(VideoAccessory_BasePin, VideoFormat)
+
+
+    ' Video Output Example - Display the contents of a font file to VGA or DVI type monitors
+    ' - Using function call with parameters : characterMap(fontIdx, backgroundColor, borderColor, gridColor, indexColor, charColor)
+
+    ' Tip: Open the colors_32bit.spin2 file to check the available color names, and/or add your own!
+
+
+
+    'characterMap(video#FONT_MEDIUM, color#WHITE, color#WHITE, color#PLX_LIGHTBLUE, color#PLX_LIGHTBLUE, color#OLIVE) ' Light Background
+
+    characterMap(video#FONT_MEDIUM, color#PLX_BLACK, color#WHITE, color#LIMEGREEN, color#OLIVEGREEN, color#PALEGREEN) ' Dark Background
+
+
+
+    ' All done! Do something else here, or nothing !
+
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+PRI characterMap(fontIdx, backgroundColor, borderColor, gridColor, indexColor, charColor) : value | i, x, y, boxWidth, boxHeight, yMax, xMax, originX, originY, pageDisplay
+
+
+    ' Set background color
+    video.SetBackgroundColor(backgroundColor)
+
+    ' Load header bar logo image
+    x := (video.XSIZE - 640) / 2                            ' Center align the image by adding some padding. Deduct the header image width of 640 pixels from the actual monitor width (XSIZE), then divide by 2.
+    video.LoadImage(x, 0, @headerImg {640x50}, true)        ' (pixelX, pixelY, imgAddr, imgFlip)
+
+    ' Draw a box (border) around the screen edges
+    video.DrawBox(0,0,video.XSIZE,video.YSIZE,borderColor, 3)
+
+
+    ' Pre-calculate width and height values that are re-used often
+    boxWidth := video.FontWidth(fontIdx) * 6
+    boxHeight := video.FontHeight(fontIdx) + 4
+
+    ' Calculate origin values, to position the grid on screen
+    x := video.XSIZE / boxWidth ' Deduct the width of both left and right borders (2*3)
+    originX := ((video.XSIZE - (x * boxWidth)) / 2) -1      ' Center align the grid.
+    originY := 58 ' To clear the header/logo
+
+
+    yMax := video.YSIZE-3-boxHeight ' deduct border width -3 and the boxHeight
+    xMax := video.XSIZE-originX-boxWidth
+
+    pageDisplay := false ' If font exceeds one screen view (ie. large font), then the code below will change this value to true, and auto-page the display.
+
+
+    ' Main loop
+    repeat
+
+        x := originX
+        y := originY
+
+        waitms(2000) ' On first loop allows monitor to wakeup, on subsequent loops allows time to read each screen when the font exceeds one screen view.
+
+
+        repeat i from 0 to 255 ' repeat the following for each font character, from 0 to 255.
+
+          ' Draw box
+          video.DrawBox(x, y, boxWidth, boxHeight, gridColor, 1)
+
+          ' Write index number
+          video.WriteText(x+4, y+2, nstr.dec(i,3), fontIdx, indexColor, backgroundColor, false) ' (pixelX, pixelY, textStr, fontIdx, colorFg, colorBg, textShadow)
+
+          ' Write character from font at index i
+          charbuf[0] := i
+          video.WriteText(x+4+(video.FontWidth(fontIdx)*4), y+2, @charbuf, fontIdx, charColor, backgroundColor, false) ' Add fontwidth*4 to x, as the index is 3 digits, plus 1 for padding
+
+
+          ' Drawing co-ordinate adjustments
+          y += boxHeight ' Increment y for next box
+
+          if y >= yMax
+
+              y := originY ' reset to start of next column
+              x += boxWidth
+
+          if x >= xMax
+
+              ' Set flag to repeat display (paging mode)
+              pageDisplay := true
+
+              ' Pause, then clear/redraw grid (ie. next page)
+              waitms(2000)
+
+              x := originX
+              y := originY
+
+              ' Clear Grid
+              video.DrawLineH(x, y, video.XSIZE-(x*2), backgroundColor, video.YSIZE - y - 3) ' Deduct 3 more from Y-Size to clear the bottom border.
+
+        if !pageDisplay ' Only page display when font size too big to fit on one screen view.
+
+              return
+
+
+
+' -------------------------------------------------------------------------------------------------------------------------------
+
+
+
+DAT
+
+    ' IMPORTANT !   512kB file size limit.
+    '                               For larger images, store to SD card, or load to upper Flash memory.
+
+    headerImg       file "P2_Character_Map_TitleBar_640x50.bmp"
+
+
+
+
+
+
+{{
+-------------
+LICENSE TERMS
+-------------
+Copyright 2022 Parallax Inc. https://www.parallax.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+}}
