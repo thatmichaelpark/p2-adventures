@@ -1,4 +1,23 @@
 # p2-adventures
 
-In which I blah blah blah...
-<img width="1329" alt="Screenshot 2023-06-21 at 11 39 58 AM" src="https://github.com/thatmichaelpark/p2-adventures/assets/16363045/c014ab4f-d9a2-460b-8ba9-1cb4b63dcc0a">
+## p2videodrv0_91b
+
+(From the first post in this thread: [https://forums.parallax.com/discussion/170676/p2-dvi-vga-driver/p1](https://forums.parallax.com/discussion/170676/p2-dvi-vga-driver/p1).)
+
+This directory contains two demos:
+- demo.spin2
+- complexdemo.spin2
+
+demo.spin2 demonstrates text display on a VGA or HDMI monitor. complexdemo.spin2 demonstrates text and graphics on a VGA or HDMI monitor.
+
+Compile with FlexProp 6.5.0 (these programs do not compile with PropTool).
+
+Hardware required:
+- P2 Edge (with or without 32MB memory)
+- P2 Edge Breadboard
+- P2 Eval A/V Breakout Add-on Board (for VGA)
+- P2 Eval Digital Video Out Add-on Board (for HDMI)
+
+(or equivalents)
+
+N.B. These demos use an old (obsolete?) version of Roger Loh's driver.
